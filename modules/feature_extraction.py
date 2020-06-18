@@ -61,6 +61,21 @@ class ResNet_FeatureExtractor(nn.Module):
     def forward(self, input):
         return self.ConvNet(input)
 
+class Bezier_FeatureExtractor(nn.Module):
+    """A Novel FeatureExtractor for Arbitatray Shape Text"""
+
+    def __init__(self, input_chaanel, output_channel=512):
+        super(Bezier_FeatureExtractor, self).__init__()
+        self.BezierNet = BezierNet()
+        self.ConvNet = ResNet(input_channel, output_channel, BasicBlock, [1, 2, 5, 3], True)
+
+    def forward(self, input):
+        atten_maps = self.BezierNet(input) # [B, max_len, H*W]
+        visual_features_2D = self.ConvNet(input)
+        # insert shape change
+        visual_features_1D = torch.matmul(atten_maps, visual_features_2D)
+        return visual_features_1D
+
 
 # For Gated RCNN
 class GRCL(nn.Module):
@@ -152,9 +167,9 @@ class BasicBlock(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, input_channel, output_channel, block, layers):
+    def __init__(self, input_channel, output_channel, block, layers, is_2D=False):
         super(ResNet, self).__init__()
-
+        self.is_2D = is_2D
         self.output_channel_block = [int(output_channel / 4), int(output_channel / 2), output_channel, output_channel]
 
         self.inplanes = int(output_channel / 8)
@@ -177,19 +192,21 @@ class ResNet(nn.Module):
         self.conv2 = nn.Conv2d(self.output_channel_block[1], self.output_channel_block[
                                1], kernel_size=3, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(self.output_channel_block[1])
-
-        self.maxpool3 = nn.MaxPool2d(kernel_size=2, stride=(2, 1), padding=(0, 1))
+        
+        if not self.is_2D:
+            self.maxpool3 = nn.MaxPool2d(kernel_size=2, stride=(2, 1), padding=(0, 1))
         self.layer3 = self._make_layer(block, self.output_channel_block[2], layers[2], stride=1)
         self.conv3 = nn.Conv2d(self.output_channel_block[2], self.output_channel_block[
                                2], kernel_size=3, stride=1, padding=1, bias=False)
         self.bn3 = nn.BatchNorm2d(self.output_channel_block[2])
 
         self.layer4 = self._make_layer(block, self.output_channel_block[3], layers[3], stride=1)
-        self.conv4_1 = nn.Conv2d(self.output_channel_block[3], self.output_channel_block[
-                                 3], kernel_size=2, stride=(2, 1), padding=(0, 1), bias=False)
+        if not self.is_2D:
+            self.conv4_1 = nn.Conv2d(self.output_channel_block[3], self.output_channel_block[3], kernel_size=2, stride=(2, 1), padding=(0, 1), bias=False)
+        else:
+            self.conv4_1 = nn.Conv2d(self.output_channel_block[3], self.output_channel_block[3], kernel_size=2, stride=1, padding=0, bias=False)
         self.bn4_1 = nn.BatchNorm2d(self.output_channel_block[3])
-        self.conv4_2 = nn.Conv2d(self.output_channel_block[3], self.output_channel_block[
-                                 3], kernel_size=2, stride=1, padding=0, bias=False)
+        self.conv4_2 = nn.Conv2d(self.output_channel_block[3], self.output_channel_block[3], kernel_size=2, stride=1, padding=0, bias=False)
         self.bn4_2 = nn.BatchNorm2d(self.output_channel_block[3])
 
     def _make_layer(self, block, planes, blocks, stride=1):
@@ -229,7 +246,8 @@ class ResNet(nn.Module):
         x = self.bn2(x)
         x = self.relu(x)
 
-        x = self.maxpool3(x)
+        if not self.is_2D:
+            x = self.maxpool3(x)
         x = self.layer3(x)
         x = self.conv3(x)
         x = self.bn3(x)
@@ -244,3 +262,46 @@ class ResNet(nn.Module):
         x = self.relu(x)
 
         return x
+
+
+class BezierNet(nn.Module):
+    """Predicting Bezier Control Points and Producing Sequential Attention Maps"""
+    
+    def __init__(self, input_channel, output_channel=512, max_len=25)
+        super(BezierNet, self).__init__()
+        self.nums_cpt = 4
+        self.output_channel = [int(output_channel / 8), int(output_channel / 4), int(output_channel / 2), output_channel]
+        self.ConvNet = nn.Sequential(
+            nn.Conv2d(input_channel, self.output_channel[0], 3, 1, 1, bias=False), nn.BatchNorm2d(self.output_channel[0]), nn.ReLU(True),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(self.output_channel[0], self.output_channel[1], 3, 1, 1, bias=False), nn.BatchNorm2d(self.output_channel[1]), nn.ReLU(True),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(self.output_channel[1], self.output_channel[2], 3, 1, 1, bias=False), nn.BatchNorm2d(self.output_channel[2]), nn.ReLU(True),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(self.output_channel[2], self.output_channel[3], 3, 1, 1, bias=False), nn.BatchNorm2d(self.output_channel[3]), nn.ReLU(True),
+            nn.AdaptiveAvgPool2d(1)
+            )
+
+        self.fc1 = nn.Sequential(nn.Linear(output_channel, 256), nn.ReLU(True))
+        self.fc2 = nn.Linear(256, self.nums_cpt*2*2)
+
+        # Init fc2
+        self.fc2.weight.data.fill_(0)
+        ctrl_pts_x = np.linspace(-1.0, 1.0, self.nums_cpt)
+        ctrl_pts_y_top = np.linspace(0.0, -1.0, self.nums_cpt)
+        ctrl_pts_y_bottom = np.linspace(1.0, 0.0, self.nums_cpt)
+        ctrl_pts_top = np.stack([ctrl_pts_x, ctrl_pts_y_top], axis=1)
+        ctrl_pts_bottom = np.stack([ctrl_pts_x, ctrl_pts_y_bottom], axis=1)
+        ctrl_pts = np.concatenate([ctrl_pts_top, ctrl_pts_bottom], axis=0)
+        self.fc2.bias.data = torch.from_numpy(initial_bias).float().view(-1)
+
+    def forward(self, Input):
+        batch_size = Input.size(0)
+        features = self.ConvNet(Input).view(batch_size, -1)
+        ctrl_pts = self.fc2(self.fc1(features)).view(batch_size, self.nums_cpt*2, 2)
+        ctrl_pts_top = ctrl_pts[:, :self.nums_cpt]
+        ctrl_pts_bottom = ctrl_pts[:, self.nums_cpt:]
+
+        # TODO: 
+        return atten_maps
+        

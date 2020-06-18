@@ -44,11 +44,18 @@ def train(opt):
     log.close()
     
     """ model configuration """
-    if 'CTC' in opt.Prediction:
+    if opt.Prediction == 'CTC':
         converter = CTCLabelConverter(opt.character)
-    else:
+    elif opt.Prediction == 'Attn':
         converter = AttnLabelConverter(opt.character)
-    opt.num_class = len(converter.character)
+    else:
+        converter0 = CTCLabelConverter(opt.character)
+        converter1 = AttnLabelConverter(opt.character)
+
+    if opt.Prediction == 'CTC-Attn':
+        opt.num_class = len(converter0.character)
+    else:
+        opt.num_class = len(converter.character)
 
     if opt.rgb:
         opt.input_channel = 3
@@ -85,10 +92,13 @@ def train(opt):
     print(model)
 
     """ setup loss """
-    if 'CTC' in opt.Prediction:
+    if opt.Prediction == 'CTC':
         criterion = torch.nn.CTCLoss(zero_infinity=True).to(device)
-    else:
+    elif opt.Prediction == 'Attn':
         criterion = torch.nn.CrossEntropyLoss(ignore_index=0).to(device)  # ignore [GO] token = ignore index 0
+    else:
+        criterion0 = torch.nn.CTCLoss(zero_infinity=True).to(device)
+        criterion1 = torch.nn.CrossEntropyLoss(ignore_index=0).to(device)
     # loss averager
     loss_avg = Averager()
 
@@ -138,19 +148,30 @@ def train(opt):
         # train part
         image_tensors, labels = train_dataset.get_batch()
         image = image_tensors.to(device)
-        text, length = converter.encode(labels, batch_max_length=opt.batch_max_length)
+        if opt.Prediction == 'CTC-Attn':
+            text0, length0 = converter0.encode(labels, batch_max_length=opt.batch_max_length)
+            text1, length1 = converter1.encode(labels, batch_max_length=opt.batch_max_length)
+        else:
+            text, length = converter.encode(labels, batch_max_length=opt.batch_max_length)
         batch_size = image.size(0)
 
-        if 'CTC' in opt.Prediction:
+        if opt.Prediction == 'CTC':
             preds = model(image, text)
             preds_size = torch.IntTensor([preds.size(1)] * batch_size)
             preds = preds.log_softmax(2).permute(1, 0, 2)
             cost = criterion(preds, text, preds_size, length)
-
-        else:
+        elif opt.Prediction == 'Attn':
             preds = model(image, text[:, :-1])  # align with Attention.forward
             target = text[:, 1:]  # without [GO] Symbol
             cost = criterion(preds.view(-1, preds.shape[-1]), target.contiguous().view(-1))
+        else:
+            preds0, preds1 = model(image, text1[:, :-1])
+            preds0_size = torch.IntTensor([preds.size(1)] * batch_size)
+            preds0 = preds.log_softmax(2).permute(1, 0, 2)
+            cost0 = criterion0(preds0, text0, preds_size, length0)
+            target = text1[:, 1:]
+            cost1 = criterion1(preds1.view(-1, preds.shape[-1]), target.contiguous().view(-1))
+            cost = 0.1 * cost0 + cost1
 
         model.zero_grad()
         cost.backward()
@@ -167,7 +188,7 @@ def train(opt):
                 model.eval()
                 with torch.no_grad():
                     valid_loss, current_accuracy, current_norm_ED, preds, confidence_score, labels, infer_time, length_of_data = validation(
-                        model, criterion, valid_loader, converter, opt)
+                        model, criterion1, valid_loader, converter, opt)
                 model.train()
 
                 # training loss and validation loss
@@ -252,8 +273,8 @@ if __name__ == '__main__':
     parser.add_argument('--Transformation', type=str, required=True, help='Transformation stage. None|TPS')
     parser.add_argument('--FeatureExtraction', type=str, required=True,
                         help='FeatureExtraction stage. VGG|RCNN|ResNet')
-    parser.add_argument('--SequenceModeling', type=str, required=True, help='SequenceModeling stage. None|BiLSTM')
-    parser.add_argument('--Prediction', type=str, required=True, help='Prediction stage. CTC|Attn')
+    parser.add_argument('--SequenceModeling', type=str, required=True, help='SequenceModeling stage. None|BiLSTM|SelfAttn')
+    parser.add_argument('--Prediction', type=str, required=True, help='Prediction stage. CTC|Attn|CTC-Attn')
     parser.add_argument('--num_fiducial', type=int, default=20, help='number of fiducial points of TPS-STN')
     parser.add_argument('--input_channel', type=int, default=1,
                         help='the number of input channel of Feature extractor')

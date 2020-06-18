@@ -18,7 +18,7 @@ import torch.nn as nn
 
 from modules.transformation import TPS_SpatialTransformerNetwork
 from modules.feature_extraction import VGG_FeatureExtractor, RCNN_FeatureExtractor, ResNet_FeatureExtractor
-from modules.sequence_modeling import BidirectionalLSTM
+from modules.sequence_modeling import BidirectionalLSTM, SelfAttention
 from modules.prediction import Attention
 
 
@@ -55,6 +55,9 @@ class Model(nn.Module):
                 BidirectionalLSTM(self.FeatureExtraction_output, opt.hidden_size, opt.hidden_size),
                 BidirectionalLSTM(opt.hidden_size, opt.hidden_size, opt.hidden_size))
             self.SequenceModeling_output = opt.hidden_size
+        elif opt.SequenceModeling == 'SelfAttn':
+            self.SequenceModeling = SelfAttention(self.FeatureExtraction_output, opt.hidden_size, opt.output_size)
+            self.SequenceModeling_output = opt.output_size
         else:
             print('No SequenceModeling module specified')
             self.SequenceModeling_output = self.FeatureExtraction_output
@@ -64,6 +67,9 @@ class Model(nn.Module):
             self.Prediction = nn.Linear(self.SequenceModeling_output, opt.num_class)
         elif opt.Prediction == 'Attn':
             self.Prediction = Attention(self.SequenceModeling_output, opt.hidden_size, opt.num_class)
+        elif opt.Prediction == 'CTC-Attn':
+            self.Prediction1 = nn.Linear(self.FeatureExtraction_output, opt.num_class)
+            self.Prediction2 = Attention(self.SequenceModeling_output, opt.hidden_size, opt.num_class+1)
         else:
             raise Exception('Prediction is neither CTC or Attn')
 
@@ -86,7 +92,11 @@ class Model(nn.Module):
         """ Prediction stage """
         if self.stages['Pred'] == 'CTC':
             prediction = self.Prediction(contextual_feature.contiguous())
-        else:
+        elif self.stages['Pred'] == 'Attn':
             prediction = self.Prediction(contextual_feature.contiguous(), text, is_train, batch_max_length=self.opt.batch_max_length)
+        else:
+            prediction1 = self.Prediction1(visual_feature.contiguous())
+            prediction2 = self.Prediction2(contextual_feature.contiguous(), text, is_train, batch_max_length=self.opt.batch_max_length)
+            prediction = [prediction1, prediction2]
 
         return prediction

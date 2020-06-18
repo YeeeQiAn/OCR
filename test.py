@@ -90,10 +90,13 @@ def validation(model, criterion, evaluation_loader, converter, opt):
         length_for_pred = torch.IntTensor([opt.batch_max_length] * batch_size).to(device)
         text_for_pred = torch.LongTensor(batch_size, opt.batch_max_length + 1).fill_(0).to(device)
 
+        '''if opt.Prediction == 'CTC-Attn':
+            text_for_lss, length_for_loss = converter1.encode(labels, batch_max_length=opt.batch_max_length)
+        else:'''
         text_for_loss, length_for_loss = converter.encode(labels, batch_max_length=opt.batch_max_length)
 
         start_time = time.time()
-        if 'CTC' in opt.Prediction:
+        if opt.Prediction == 'CTC':
             preds = model(image, text_for_pred)
             forward_time = time.time() - start_time
 
@@ -105,8 +108,7 @@ def validation(model, criterion, evaluation_loader, converter, opt):
             # Select max probabilty (greedy decoding) then decode index to character
             _, preds_index = preds.max(2)
             preds_str = converter.decode(preds_index.data, preds_size.data)
-        
-        else:
+        elif opt.Prediction == 'Attn':
             preds = model(image, text_for_pred, is_train=False)
             forward_time = time.time() - start_time
 
@@ -115,6 +117,17 @@ def validation(model, criterion, evaluation_loader, converter, opt):
             cost = criterion(preds.contiguous().view(-1, preds.shape[-1]), target.contiguous().view(-1))
 
             # select max probabilty (greedy decoding) then decode index to character
+            _, preds_index = preds.max(2)
+            preds_str = converter.decode(preds_index, length_for_pred)
+            labels = converter.decode(text_for_loss[:, 1:], length_for_loss)
+        else:
+            _, preds = model(image, text_for_pred, is_train=False)
+            forward_time = time.time() - start_time
+
+            preds = preds[:, :text_for_loss.shape[1] - 1, :]
+            target = text_for_loss[:, 1:]
+            cost = criterion(preds.contiguous().view(-1, preds.shape[-1]), target.contiguous().view(-1))
+
             _, preds_index = preds.max(2)
             preds_str = converter.decode(preds_index, length_for_pred)
             labels = converter.decode(text_for_loss[:, 1:], length_for_loss)
@@ -178,11 +191,18 @@ def validation(model, criterion, evaluation_loader, converter, opt):
 
 def test(opt):
     """ model configuration """
-    if 'CTC' in opt.Prediction:
+    if opt.Prediction == 'CTC':
         converter = CTCLabelConverter(opt.character)
-    else:
+    elif opt.Prediction == 'Attn':
         converter = AttnLabelConverter(opt.character)
-    opt.num_class = len(converter.character)
+    else:
+        converter0 = CTCLabelConverter(opt.character)
+        converter1 = AttnLabelConverter(opt.character)
+
+    if opt.Prediction == 'CTC-Attn':
+        opt.num_class = len(converter0.character)
+    else:
+        opt.num_class = len(converter.character)
 
     if opt.rgb:
         opt.input_channel = 3
@@ -203,16 +223,19 @@ def test(opt):
     os.system(f'cp {opt.saved_model} ./result/{opt.exp_name}/')
 
     """ setup loss """
-    if 'CTC' in opt.Prediction:
+    if opt.Prediction == 'CTC':
         criterion = torch.nn.CTCLoss(zero_infinity=True).to(device)
-    else:
+    elif opt.Prediction == 'Attn':
         criterion = torch.nn.CrossEntropyLoss(ignore_index=0).to(device)  # ignore [GO] token = ignore index 0
+    else:
+        criterion0 = torch.nn.CTCLoss(zero_infinity=True).to(device)
+        criterion1 = torch.nn.CrossEntropyLoss(ignore_index=0).to(device)
 
     """ evaluation """
     model.eval()
     with torch.no_grad():
         if opt.benchmark_all_eval:  # evaluation with 10 benchmark evaluation datasets
-            benchmark_all_eval(model, criterion, converter, opt)
+            benchmark_all_eval(model, criterion1, converter1, opt)
         else:
             log = open(f'./result/{opt.exp_name}/log_evaluation.txt', 'a')
             AlignCollate_evaluation = AlignCollate(imgH=opt.imgH, imgW=opt.imgW, keep_ratio_with_pad=opt.PAD)
@@ -223,7 +246,7 @@ def test(opt):
                 num_workers=int(opt.workers),
                 collate_fn=AlignCollate_evaluation, pin_memory=True)
             _, accuracy_by_best_model, _, _, _, _, _, _ = validation(
-                model, criterion, evaluation_loader, converter, opt)
+                model, criterion1, evaluation_loader, converter1, opt)
             log.write(eval_data_log)
             print(f'{accuracy_by_best_model:0.3f}')
             log.write(f'{accuracy_by_best_model:0.3f}\n')
@@ -249,8 +272,8 @@ if __name__ == '__main__':
     """ Model Architecture """
     parser.add_argument('--Transformation', type=str, required=True, help='Transformation stage. None|TPS')
     parser.add_argument('--FeatureExtraction', type=str, required=True, help='FeatureExtraction stage. VGG|RCNN|ResNet')
-    parser.add_argument('--SequenceModeling', type=str, required=True, help='SequenceModeling stage. None|BiLSTM')
-    parser.add_argument('--Prediction', type=str, required=True, help='Prediction stage. CTC|Attn')
+    parser.add_argument('--SequenceModeling', type=str, required=True, help='SequenceModeling stage. None|BiLSTM|SelfAttn')
+    parser.add_argument('--Prediction', type=str, required=True, help='Prediction stage. CTC|Attn|CTC-Attn')
     parser.add_argument('--num_fiducial', type=int, default=20, help='number of fiducial points of TPS-STN')
     parser.add_argument('--input_channel', type=int, default=1, help='the number of input channel of Feature extractor')
     parser.add_argument('--output_channel', type=int, default=512,

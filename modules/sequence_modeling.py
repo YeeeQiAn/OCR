@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 
@@ -17,3 +18,16 @@ class BidirectionalLSTM(nn.Module):
         recurrent, _ = self.rnn(input)  # batch_size x T x input_size -> batch_size x T x (2*hidden_size)
         output = self.linear(recurrent)  # batch_size x T x output_size
         return output
+
+class SelfAttention(nn.Module):
+
+    def __init__(self, input_size, hidden_size, output_size):
+        super(SelfAttention, self).__init__()
+        self.fc = nn.Linear(input_size, hidden_size)
+
+    def forward(self, input):
+        x = self.fc(input)
+        attn = torch.softmax(torch.matmul(x, x.transpose(1, 2)), 2)
+        output = torch.matmul(attn, input)
+        return output
+
