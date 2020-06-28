@@ -162,3 +162,66 @@ class GridGenerator(nn.Module):
         batch_T = torch.bmm(batch_inv_delta_C, batch_C_prime_with_zeros)  # batch_size x F+3 x 2
         batch_P_prime = torch.bmm(batch_P_hat, batch_T)  # batch_size x n x 2
         return batch_P_prime  # batch_size x n x 2
+
+class Bezier_SpatialTransformerNetwork(nn.Module):
+    def __init__(self, F, I_size, I_r_size, I_channel_num=1):
+        super(Bezier_SpatialTransformerNetwork, self).__init__()
+        self.F = F
+        self.I_size = I_size
+        self.I_r_size = I_r_size
+        self.I_channel_num = I_channel_num
+        self.LocalizationNetwork = LocalizationNetwork(self.F, self.I_channel_num)
+        self.register_buff('regular_grid', torch.tensor(self._build_regular_grid()).float())
+        self.register_buff('regular_ctrl_pts', torch.tensor(self._build_regular_ctrl_points()).float())
+
+    def _estimate_new_ctrl_points(self, raw_ctrl_pts):
+        assert raw_ctrl_pts.size(1) == 4
+        batch_size = raw_ctrl_pts.size(0)
+        sub_distance = torch.sqrt(torch.sum(torch.square(raw_ctrl_pts[:, 1:] - raw_ctrl_pts[:, :-1]), 2))
+        sub_distance_ = torch.cat([torch.zeros(B, 1), sub_distance], 1)
+        sub_distance_[:, 2] += sub_distance_[:, 1]
+        sub_distance_[:, 3] += sub_distance_[:, 2]
+        t_estimated = torch.div(sub_distance_, sub_distance_[:, -1])
+        t_estimated_ = 1. - t_estimated
+        matrix = torch.stack([torch.pow(t_estimated_, 3), 3 * torch.pow(t_estimated_, 2) * t_estimated, 3 * torch.pow(t_estimated, 2) * t_estimated_, torch.pow(t_estimated, 3)], 2)
+        new_ctrl_pts = torch.matmul(torch.inverse(matrix), raw_ctrl_pts)
+        return new_ctrl_pts
+
+    def _cal_bezier_curve(self, ctrl_pts, nums=26):
+        t = torch.linspace(0., 1., nums)
+        t_ = 1. - t
+        matrix = torch.stack([torch.pow(t_, 3), 3 * torch.pow(t_, 2) * t, 3 * torch.pow(t, 2) * t_, torch.pow(t, 3)], 1).unsqueeze(0).repeat(ctrl_pts.size(0), 1, 1)
+        bezier_curve = torch.matmul(matrix, ctrl_pts)
+        return bezier_curve
+
+    def _build_regular_grid(self):
+        I_r_height, I_r_width = self.I_r_size
+        I_r_grid_x = (np.arange(-I_r_width, I_r_width, 2) + 1.0) / I_r_width  # self.I_r_width
+        I_r_grid_y = (np.arange(-I_r_height, I_r_height, 2) + 1.0) / I_r_height  # self.I_r_height
+        P = np.stack(  # self.I_r_width x self.I_r_height x 2                   
+                np.meshgrid(I_r_grid_x, I_r_grid_y),
+                axis=2)
+
+        P_ = np.concatenate((P.reshape(-1, 2), np.ones([I_r_height * I_r_width, 1])), 1)
+        return P_  # n (= self.I_r_width x self.I_r_height) x 3
+
+    def _build_regular_ctrl_points(self, nums=26):
+        ctrl_pts_x = np.linspace(-1., 1., nums)
+        top_ctrl_pts_y = -1 * np.ones(nums)
+        bottom_ctrl_pts_y = np.ones(nums)
+        top_ctrl_pts = np.stack([ctrl_pts_x, top_ctrl_pts_y], 1)
+        bottom_ctrl_pts = np.stack([ctrl_pts_x, bottom_ctrl_pts_y], 1)
+        ctrl_pts = np.stack([top_ctrl_pts, bottom_ctrl_pts], 1)
+        return ctrl_pts
+
+    def forward(self, batch_I):
+        batch_size = batch_I.size(0)
+        ctrl_pts = self.Localization(batch_I).view(batch_size, self.F, 2)
+        top_ctrl_pts = ctrl_pts[:, :int(self.F / 2)]
+        bottom_ctrl_pts = ctrl_pts[:, int(self.F / 2):]
+        new_top_ctrl_pts = self._estimate_new_ctrl_points(top_ctrl_pts)
+        new_bottom_ctrl_pts = self._esitmate_new_ctrl_points(bottom_ctrl_pts)
+        top_bezier_curve = self._cal_bezier_curve(new_top_ctrl_pts)
+        bottom_bezier_curve = self._cal_bezier_curve(new_bottom_ctrl_pts)
+        raw_points = torch.stack([top_bezier_curve, bottom_bezier_curve], 2)
+        raw = 
